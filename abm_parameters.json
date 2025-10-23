@@ -1,0 +1,125 @@
+{
+  "equipment_value_ranges": {
+    "low": {
+      "range": [
+        0,
+        2000
+      ],
+      "label": "Low Value"
+    },
+    "medium": {
+      "range": [
+        2000,
+        4000
+      ],
+      "label": "Medium Value"
+    },
+    "high": {
+      "range": [
+        4000,
+        6000
+      ],
+      "label": "High Value"
+    },
+    "very_high": {
+      "range": [
+        6000,
+        10000
+      ],
+      "label": "Very High Value"
+    }
+  },
+  "win_probability_by_advantage": {
+    "very_behind": {
+      "advantage_range": [
+        -Infinity,
+        -2000
+      ],
+      "base_win_rate": 0.25
+    },
+    "behind": {
+      "advantage_range": [
+        -2000,
+        -1000
+      ],
+      "base_win_rate": 0.35
+    },
+    "slightly_behind": {
+      "advantage_range": [
+        -1000,
+        -500
+      ],
+      "base_win_rate": 0.42
+    },
+    "balanced": {
+      "advantage_range": [
+        -500,
+        500
+      ],
+      "base_win_rate": 0.5
+    },
+    "slightly_ahead": {
+      "advantage_range": [
+        500,
+        1000
+      ],
+      "base_win_rate": 0.58
+    },
+    "ahead": {
+      "advantage_range": [
+        1000,
+        2000
+      ],
+      "base_win_rate": 0.65
+    },
+    "very_ahead": {
+      "advantage_range": [
+        2000,
+        Infinity
+      ],
+      "base_win_rate": 0.75
+    }
+  },
+  "survivor_distributions": {
+    "winning_team": {
+      "mean": 2.9694567483014014,
+      "std": 1.2465286213661817
+    },
+    "losing_team": {
+      "mean": 1.003648613634459,
+      "std": 0.5781284690737442
+    }
+  },
+  "round_end_probabilities": {
+    "bomb_plant_rate": 0.12691344376827726,
+    "bomb_explode_rate": 0.9235137561923622,
+    "bomb_defuse_rate": 0.1706843348226778,
+    "elimination_only_rate": 0.03724604011697453
+  },
+  "equipment_saved_rates": {
+    "0": {
+      "saved_percentage_mean": 0.0,
+      "saved_percentage_std": 0.0
+    },
+    "1": {
+      "saved_percentage_mean": 144.65,
+      "saved_percentage_std": 172.37
+    },
+    "2": {
+      "saved_percentage_mean": 248.99,
+      "saved_percentage_std": 223.14
+    },
+    "3": {
+      "saved_percentage_mean": 339.06,
+      "saved_percentage_std": 216.34
+    },
+    "4": {
+      "saved_percentage_mean": 429.03,
+      "saved_percentage_std": 192.66
+    },
+    "5": {
+      "saved_percentage_mean": 518.56,
+      "saved_percentage_std": 161.81
+    }
+  }
+}
