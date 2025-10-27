@@ -189,6 +189,7 @@ Row 2: ['6588897', '9614', '1', '2700', '-7350']
 - `money_earned` - integer NULL
 - `money_earned_re` - integer NULL
 - `money_spent` - integer NULL
+- `money_start` - integer NULL
 - `saved_eq_val` - integer NULL
 - `starting_eq_val` - integer NULL
 - `donations` - integer NULL
