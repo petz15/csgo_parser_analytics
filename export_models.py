@@ -15,7 +15,99 @@ import argparse
 from pathlib import Path
 from typing import Dict, List
 
-from ml_model import DQNStrategy, PPOStrategy, REINFORCEStrategy
+from ml_model import DQNStrategy, PPOStrategy, REINFORCEStrategy, TreeStrategy
+
+FEATURE_NAMES = [
+    "own_funds", "own_score", "opponent_score",
+    "own_survivors", "opponent_survivors", "consecutive_losses",
+    "is_ct_side", "round_number", "half_length",
+    "last_round_reason", "last_bomb_planted"
+]
+
+NORMALIZATION = {
+    "own_funds": 999999.0,
+    "own_score": 16.0,
+    "opponent_score": 16.0,
+    "own_survivors": 5.0,
+    "opponent_survivors": 5.0,
+    "consecutive_losses": 5.0,
+    "round_number": 30.0,
+    "half_length": 15.0,
+    "last_round_reason": 4.0,
+}
+def export_tree_to_dict(tree, feature_names):
+    """Recursively export sklearn tree to dictionary"""
+    tree_ = tree.tree_
+    feature_name = [feature_names[i] if i != -2 else "undefined" for i in tree_.feature]
+    def recurse(node):
+        if tree_.feature[node] == -2:  # Leaf node
+            return {
+                "is_leaf": True,
+                "value": float(tree_.value[node][0][0])
+            }
+        else:
+            return {
+                "is_leaf": False,
+                "feature": feature_name[node],
+                "threshold": float(tree_.threshold[node]),
+                "left": recurse(tree_.children_left[node]),
+                "right": recurse(tree_.children_right[node])
+            }
+    return recurse(0)
+
+def export_tree_model(model_path: str, output_dir: str):
+    """Export Decision Tree or Random Forest to JSON"""
+    try:
+        import joblib
+        data = joblib.load(model_path)
+    except Exception as e:
+        print(f"Could not load model from {model_path}: {e}")
+        return
+
+    # Unwrap dictionary format saved by TreeStrategy.save
+    if isinstance(data, dict):
+        if 'model' not in data:
+            print(f"Tree model file {model_path} does not contain a trained model ('model' key missing); skipping export.")
+            return None
+        model_obj = data['model']
+        is_forest = data.get('use_forest', hasattr(model_obj, 'estimators_'))
+    else:
+        model_obj = data
+        is_forest = hasattr(model_obj, 'estimators_')
+
+    # Basic validation
+    if not hasattr(model_obj, 'tree_') and not hasattr(model_obj, 'estimators_'):
+        print(f"Unsupported tree model type: {type(model_obj)}")
+        return
+
+    # Export
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
+
+    if is_forest:
+        trees = [export_tree_to_dict(est, FEATURE_NAMES) for est in model_obj.estimators_]
+        model_json = {
+            "model_type": "random_forest",
+            "n_trees": len(trees),
+            "trees": trees,
+            "state_features": FEATURE_NAMES,
+            "normalization": NORMALIZATION
+        }
+        output_file = output_dir / "forest_model.json"
+    else:
+        tree_dict = export_tree_to_dict(model_obj, FEATURE_NAMES)
+        model_json = {
+            "model_type": "decision_tree",
+            "tree": tree_dict,
+            "state_features": FEATURE_NAMES,
+            "normalization": NORMALIZATION
+        }
+        output_file = output_dir / "tree_model.json"
+
+    with open(output_file, 'w') as f:
+        json.dump(model_json, f, indent=2)
+    print(f"✓ Exported tree model to {output_file}")
+    return output_file
 
 
 def export_pytorch_model_to_json(model: torch.nn.Module, filepath: str):
@@ -83,8 +175,7 @@ def export_dqn_strategy(strategy: DQNStrategy, output_dir: str):
     
     print(f"Exported DQN metadata to {metadata_path}")
     
-    # Generate Go inference code template
-    generate_go_inference_code(metadata, output_dir / "inference.go")
+    # (Optional) Inference template generation removed for simplicity
 
 
 def export_ppo_strategy(strategy: PPOStrategy, output_dir: str):
@@ -134,315 +225,42 @@ def export_ppo_strategy(strategy: PPOStrategy, output_dir: str):
         json.dump(metadata, f, indent=2)
     
     print(f"Exported PPO metadata to {metadata_path}")
+
+
+def export_reinforce_strategy(strategy: REINFORCEStrategy, output_dir: str):
+    """Export REINFORCE strategy similar to PPO."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
+
+    policy_path = output_dir / "policy_network_weights.json"
+    export_pytorch_model_to_json(strategy.policy, str(policy_path))
+
+    metadata = {
+        "model_type": "REINFORCE",
+        "state_dim": strategy.state_dim,
+        "architecture": {
+            "layers": []
+        },
+        "win_rate": strategy.get_win_rate(),
+        "total_matches": len(strategy.match_history),
+    }
+    for name, module in strategy.policy.network.named_children():
+        if isinstance(module, torch.nn.Linear):
+            metadata["architecture"]["layers"].append({
+                "type": "linear",
+                "in_features": module.in_features,
+                "out_features": module.out_features,
+            })
+        elif isinstance(module, torch.nn.ReLU):
+            metadata["architecture"]["layers"].append({"type": "relu"})
+    metadata_path = output_dir / "metadata.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Exported REINFORCE metadata to {metadata_path}")
     
-    # Generate Go inference code template
-    generate_go_inference_code_ppo(metadata, output_dir / "inference.go")
 
 
-def generate_go_inference_code(metadata: Dict, output_path: Path):
-    """
-    Generate Go code template for DQN inference
-    """
-    
-    go_code = f"""package main
 
-import (
-	"encoding/json"
-	"math"
-	"os"
-)
-
-// GameState represents the observable game state
-type GameState struct {{
-	OwnFunds          float64
-	OwnScore          int
-	OpponentScore     int
-	OwnSurvivors      int
-	OpponentSurvivors int
-	ConsecutiveLosses int
-	IsCTSide          bool
-	RoundNumber       int
-	HalfLength        int
-	LastRoundReason   int
-	LastBombPlanted   bool
-}}
-
-// ToArray converts GameState to normalized feature array
-func (s *GameState) ToArray() []float64 {{
-	ctSide := 0.0
-	if s.IsCTSide {{
-		ctSide = 1.0
-	}}
-	bombPlanted := 0.0
-	if s.LastBombPlanted {{
-		bombPlanted = 1.0
-	}}
-	
-	return []float64{{
-		s.OwnFunds / 50000.0,
-		float64(s.OwnScore) / 16.0,
-		float64(s.OpponentScore) / 16.0,
-		float64(s.OwnSurvivors) / 5.0,
-		float64(s.OpponentSurvivors) / 5.0,
-		math.Min(float64(s.ConsecutiveLosses), 5) / 5.0,
-		ctSide,
-		float64(s.RoundNumber) / 30.0,
-		float64(s.HalfLength) / 15.0,
-		float64(s.LastRoundReason) / 4.0,
-		bombPlanted,
-	}}
-}}
-
-// DQNModel represents a trained DQN model
-type DQNModel struct {{
-	StateDim     int         `json:"state_dim"`
-	NActions     int         `json:"n_actions"`
-	ActionValues []float64   `json:"action_values"`
-	Weights      ModelWeights
-}}
-
-// ModelWeights holds the neural network weights
-type ModelWeights struct {{
-	Layers []LayerWeights
-}}
-
-// LayerWeights represents weights for one layer
-type LayerWeights struct {{
-	Weight [][]float64
-	Bias   []float64
-}}
-
-// LoadModel loads a DQN model from JSON files
-func LoadModel(metadataPath, weightsPath string) (*DQNModel, error) {{
-	// Load metadata
-	metadataFile, err := os.ReadFile(metadataPath)
-	if err != nil {{
-		return nil, err
-	}}
-	
-	var model DQNModel
-	if err := json.Unmarshal(metadataFile, &model); err != nil {{
-		return nil, err
-	}}
-	
-	// Load weights
-	weightsFile, err := os.ReadFile(weightsPath)
-	if err != nil {{
-		return nil, err
-	}}
-	
-	var rawWeights map[string]interface{{}}
-	if err := json.Unmarshal(weightsFile, &rawWeights); err != nil {{
-		return nil, err
-	}}
-	
-	// Parse weights into layer structure
-	// This is simplified - actual implementation would need to parse the layer structure
-	
-	return &model, nil
-}}
-
-// ReLU activation function
-func relu(x float64) float64 {{
-	if x > 0 {{
-		return x
-	}}
-	return 0
-}}
-
-// LayerNorm normalization (simplified)
-func layerNorm(x []float64) []float64 {{
-	mean := 0.0
-	for _, v := range x {{
-		mean += v
-	}}
-	mean /= float64(len(x))
-	
-	variance := 0.0
-	for _, v := range x {{
-		variance += (v - mean) * (v - mean)
-	}}
-	variance /= float64(len(x))
-	
-	result := make([]float64, len(x))
-	for i, v := range x {{
-		result[i] = (v - mean) / math.Sqrt(variance+1e-5)
-	}}
-	return result
-}}
-
-// Forward pass through linear layer
-func linearForward(input []float64, weight [][]float64, bias []float64) []float64 {{
-	output := make([]float64, len(bias))
-	for i := range output {{
-		sum := bias[i]
-		for j := range input {{
-			sum += input[j] * weight[i][j]
-		}}
-		output[i] = sum
-	}}
-	return output
-}}
-
-// Predict Q-values for a given state
-func (m *DQNModel) Predict(state GameState) []float64 {{
-	x := state.ToArray()
-	
-	// Forward pass through network
-	// This is simplified - actual implementation would iterate through layers
-	for _, layer := range m.Weights.Layers {{
-		x = linearForward(x, layer.Weight, layer.Bias)
-		// Apply activation (ReLU) except for last layer
-		for i := range x {{
-			x[i] = relu(x[i])
-		}}
-		x = layerNorm(x)
-	}}
-	
-	return x
-}}
-
-// SelectAction selects the best action based on Q-values
-func (m *DQNModel) SelectAction(state GameState) float64 {{
-	qValues := m.Predict(state)
-	
-	// Find action with maximum Q-value
-	maxIdx := 0
-	maxVal := qValues[0]
-	for i := 1; i < len(qValues); i++ {{
-		if qValues[i] > maxVal {{
-			maxVal = qValues[i]
-			maxIdx = i
-		}}
-	}}
-	
-	return m.ActionValues[maxIdx]
-}}
-
-func main() {{
-	// Example usage
-	model, err := LoadModel("metadata.json", "q_network_weights.json")
-	if err != nil {{
-		panic(err)
-	}}
-	
-	state := GameState{{
-		OwnFunds:          10000,
-		OwnScore:          7,
-		OpponentScore:     5,
-		OwnSurvivors:      3,
-		OpponentSurvivors: 2,
-		ConsecutiveLosses: 1,
-		IsCTSide:          true,
-		RoundNumber:       12,
-		HalfLength:        15,
-		LastRoundReason:   4,
-		LastBombPlanted:   false,
-	}}
-	
-	action := model.SelectAction(state)
-	println("Selected investment ratio:", action)
-}}
-"""
-    
-    with open(output_path, 'w') as f:
-        f.write(go_code)
-    
-    print(f"Generated Go inference template at {output_path}")
-
-
-def generate_go_inference_code_ppo(metadata: Dict, output_path: Path):
-    """
-    Generate Go code template for PPO inference
-    """
-    
-    go_code = """package main
-
-import (
-	"encoding/json"
-	"math"
-	"math/rand"
-	"os"
-)
-
-// GameState - same as DQN version above
-
-// PPOModel represents a trained PPO model
-type PPOModel struct {
-	StateDim int          `json:"state_dim"`
-	Weights  PolicyWeights
-}
-
-// PolicyWeights holds the policy network weights
-type PolicyWeights struct {
-	SharedLayers []LayerWeights
-	AlphaHead    LayerWeights
-	BetaHead     LayerWeights
-}
-
-// Softplus activation: log(1 + exp(x))
-func softplus(x float64) float64 {
-	if x > 20 {
-		return x  // Numerical stability
-	}
-	return math.Log(1 + math.Exp(x))
-}
-
-// BetaDistribution samples from Beta distribution
-type BetaDistribution struct {
-	Alpha float64
-	Beta  float64
-}
-
-// Sample from Beta distribution using rejection sampling (simplified)
-func (b *BetaDistribution) Sample() float64 {
-	// Simplified sampling - actual implementation would use proper Beta sampling
-	// For Go implementation, consider using gonum.org/v1/gonum/stat/distuv
-	
-	// Mean of Beta distribution as approximation
-	return b.Alpha / (b.Alpha + b.Beta)
-}
-
-// Predict returns Beta distribution parameters
-func (m *PPOModel) Predict(state GameState) (float64, float64) {
-	x := state.ToArray()
-	
-	// Forward through shared layers
-	for _, layer := range m.Weights.SharedLayers {
-		x = linearForward(x, layer.Weight, layer.Bias)
-		for i := range x {
-			x[i] = relu(x[i])
-		}
-		x = layerNorm(x)
-	}
-	
-	// Alpha and Beta heads
-	alphaOut := linearForward(x, m.Weights.AlphaHead.Weight, m.Weights.AlphaHead.Bias)
-	betaOut := linearForward(x, m.Weights.BetaHead.Weight, m.Weights.BetaHead.Bias)
-	
-	alpha := softplus(alphaOut[0]) + 1.0
-	beta := softplus(betaOut[0]) + 1.0
-	
-	return alpha, beta
-}
-
-// SelectAction selects action by sampling from policy
-func (m *PPOModel) SelectAction(state GameState) float64 {
-	alpha, beta := m.Predict(state)
-	
-	dist := BetaDistribution{Alpha: alpha, Beta: beta}
-	return dist.Sample()
-}
-
-func main() {
-	// Example usage - same as DQN version
-}
-"""
-    
-    with open(output_path, 'w') as f:
-        f.write(go_code)
-    
-    print(f"Generated Go inference template (PPO) at {output_path}")
 
 
 def export_all_models(models_dir: str, output_base_dir: str):
@@ -456,11 +274,11 @@ def export_all_models(models_dir: str, output_base_dir: str):
         print(f"Models directory not found: {models_dir}")
         return
     
-    # Find all model files
-    model_files = list(models_dir.glob("*.pt"))
+    # Find all model files (both .pt and .joblib)
+    model_files = list(models_dir.glob("*.pt")) + list(models_dir.glob("*.joblib"))
     
     if not model_files:
-        print(f"No .pt model files found in {models_dir}")
+        print(f"No model files (.pt or .joblib) found in {models_dir}")
         return
     
     print(f"\nFound {len(model_files)} model files")
@@ -469,9 +287,7 @@ def export_all_models(models_dir: str, output_base_dir: str):
     for model_file in model_files:
         model_name = model_file.stem
         print(f"\nExporting {model_name}...")
-        
         output_dir = output_base_dir / model_name
-        
         try:
             # Determine model type from name
             if 'dqn' in model_name.lower():
@@ -485,14 +301,15 @@ def export_all_models(models_dir: str, output_base_dir: str):
             elif 'reinforce' in model_name.lower():
                 strategy = REINFORCEStrategy()
                 strategy.load(str(model_file))
-                # REINFORCE uses same structure as PPO for export
-                export_ppo_strategy(strategy, str(output_dir))
+                export_reinforce_strategy(strategy, str(output_dir))
+            elif 'tree' in model_name.lower() or 'forest' in model_name.lower():
+                result = export_tree_model(str(model_file), str(output_dir))
+                if result is None:
+                    raise RuntimeError("Tree/forest model not exported (untrained or incompatible format)")
             else:
                 print(f"  Unknown model type: {model_name}, skipping")
                 continue
-            
             print(f"  ✓ Exported successfully to {output_dir}")
-            
         except Exception as e:
             print(f"  ✗ Error exporting {model_name}: {e}")
     

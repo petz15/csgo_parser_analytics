@@ -1,13 +1,12 @@
 # Usage Examples - CS:GO Economic ABM RL Training
 
-This document provides practical examples for training and evaluating RL models.
+This document provides practical examples for training RL models from ABM data and deploying them.
 
 ## Table of Contents
 - [Quick Start](#quick-start)
 - [Training from ABM Data](#training-from-abm-data)
-- [Self-Play Training](#self-play-training)
-- [Model Evaluation](#model-evaluation)
 - [Export to Go](#export-to-go)
+- [ABM Integration](#abm-integration)
 - [Advanced Workflows](#advanced-workflows)
 
 ---
@@ -104,77 +103,53 @@ python train_from_abm_data.py `
 
 ---
 
-## Self-Play Training
+## Export to Go
 
-### Example 5: Train Against Baselines
+### Example 5: Export DQN Model
 ```powershell
-# Train DQN and PPO against rule-based strategies
-python trainer.py `
-  --n-matches 1000 `
-  --eval-matches 100 `
-  --strategies dqn ppo adaptive momentum `
-  --save-dir models_selfplay
+# Export trained DQN model
+python export_models.py `
+  --models-dir models_from_abm `
+  --output-dir exported_go_models `
+  --strategies dqn
 ```
 
 **Output:**
-- Match results and win rates
-- Trained models in `models_selfplay/`
-- `training_results_*.json` with performance metrics
+- `exported_go_models/dqn_model.json` - Weights and metadata
+- `exported_go_models/dqn_inference.go` - Go inference code
 
-### Example 6: Focused Self-Play (Two Strategies)
+### Example 6: Export PPO Model
 ```powershell
-# Train DQN vs PPO head-to-head
-python trainer.py `
-  --n-matches 2000 `
-  --eval-matches 200 `
-  --strategies dqn ppo `
-  --save-dir models_dqn_vs_ppo
+# Export trained PPO model
+python export_models.py `
+  --models-dir models_from_abm `
+  --output-dir exported_go_models `
+  --strategies ppo
 ```
 
-**Why?** Focused competition can lead to more specialized strategies.
+**Output:**
+- `exported_go_models/ppo_model.json`
+- `exported_go_models/ppo_inference.go`
 
-### Example 7: Tournament Style (All Strategies)
+### Example 7: Export All Models
 ```powershell
-# Round-robin tournament with all strategies
-python trainer.py `
-  --n-matches 500 `
-  --eval-matches 100 `
-  --strategies fullbuy conservative random adaptive momentum dqn ppo reinforce `
-  --save-dir models_tournament
+# Export all available models
+python export_models.py `
+  --models-dir models_from_abm `
+  --output-dir exported_go_models `
+  --strategies dqn ppo reinforce
 ```
-
-**Why?** Find the most robust strategy across diverse opponents.
 
 ---
 
-## Model Evaluation
+## ABM Integration
 
-### Example 8: Compare Trained Models
-```powershell
-# Evaluate models trained from ABM data vs self-play
-python trainer.py `
-  --n-matches 0 `
-  --eval-matches 500 `
-  --strategies dqn ppo adaptive `
-  --save-dir evaluation_results
+**See `ABM_INTEGRATION.md` for complete guide on using trained models in your Go ABM.**
 
-# Load pre-trained models first (modify trainer.py to load from specific paths)
-```
+### Example 8: Test Model Decisions
 
-### Example 9: Analyze Training Progress
-```powershell
-# View training info
-Get-Content models_from_abm/training_info.json | ConvertFrom-Json | Format-List
-
-# Check all model files
-Get-ChildItem models_from_abm/*.pt | ForEach-Object {
-    Write-Host "Model: $($_.Name) - Size: $($_.Length) bytes"
-}
-```
-
-### Example 10: Test Model Inference
 ```python
-# test_inference.py
+# test_model_decisions.py
 from ml_model import StrategyFactory, GameState
 
 # Load trained model
@@ -200,133 +175,35 @@ for i, state in enumerate(test_states):
 ```
 
 ```powershell
-# Run the test
-python test_inference.py
-```
-
----
-
-## Export to Go
-
-### Example 11: Export DQN Model
-```powershell
-# Export trained DQN model
-python export_models.py `
-  --models-dir models_from_abm `
-  --output-dir exported_go_models `
-  --strategies dqn
-```
-
-**Output:**
-- `exported_go_models/dqn_model.json` - Weights and metadata
-- `exported_go_models/dqn_inference.go` - Go inference code
-
-### Example 12: Export PPO Model
-```powershell
-# Export trained PPO model
-python export_models.py `
-  --models-dir models_from_abm `
-  --output-dir exported_go_models `
-  --strategies ppo
-```
-
-**Output:**
-- `exported_go_models/ppo_model.json`
-- `exported_go_models/ppo_inference.go`
-
-### Example 13: Export All Models
-```powershell
-# Export all available models
-python export_models.py `
-  --models-dir models_from_abm `
-  --output-dir exported_go_models `
-  --strategies dqn ppo reinforce
-```
-
-### Example 14: Integrate with Go ABM
-```go
-// In your Go ABM code
-package main
-
-import (
-    "encoding/json"
-    "os"
-)
-
-// Load the exported model
-func loadModel(path string) (*DQNModel, error) {
-    data, err := os.ReadFile(path)
-    if err != nil {
-        return nil, err
-    }
-    
-    var model DQNModel
-    if err := json.Unmarshal(data, &model); err != nil {
-        return nil, err
-    }
-    
-    return &model, nil
-}
-
-func main() {
-    // Load model
-    model, err := loadModel("exported_go_models/dqn_model.json")
-    if err != nil {
-        panic(err)
-    }
-    
-    // Create game state
-    state := GameState{
-        OwnFunds: 10000,
-        OwnScore: 5,
-        OpponentScore: 4,
-        // ... other fields
-    }
-    
-    // Get investment decision
-    action := model.Forward(state.ToArray())
-    investment := int(action * float64(state.OwnFunds))
-    
-    println("AI Decision: Invest $", investment)
-}
+python test_model_decisions.py
 ```
 
 ---
 
 ## Advanced Workflows
 
-### Example 15: Continuous Training Pipeline
+### Example 9: Complete Training and Export Pipeline
 ```powershell
-# 1. Initial training from ABM data
+# 1. Train from ABM data
 python train_from_abm_data.py `
   --results-dir results_20251118_002441 `
-  --strategies dqn ppo `
+  --strategies dqn `
   --use-winning-only `
   --epochs 20 `
-  --save-dir models_stage1
+  --save-dir production_models
 
-# 2. Refine with self-play
-python trainer.py `
-  --n-matches 2000 `
-  --strategies dqn ppo `
-  --save-dir models_stage2
-  # (Manually load stage1 models first)
-
-# 3. Final evaluation
-python trainer.py `
-  --n-matches 0 `
-  --eval-matches 1000 `
-  --strategies dqn ppo adaptive `
-  --save-dir models_final_eval
-
-# 4. Export best model
+# 2. Export for Go
 python export_models.py `
-  --models-dir models_stage2 `
-  --output-dir production_models `
+  --models-dir production_models `
+  --output-dir go_models `
   --strategies dqn
+
+# 3. Copy to your Go ABM project
+Copy-Item go_models\dqn_model.json ..\your_go_abm\models\
+Copy-Item go_models\dqn_inference.go ..\your_go_abm\
 ```
 
-### Example 16: Hyperparameter Sweep
+### Example 10: Hyperparameter Sweep
 ```powershell
 # Test different batch sizes
 foreach ($batch in @(32, 64, 128, 256)) {
@@ -345,65 +222,23 @@ Get-ChildItem models_batch_* -Directory | ForEach-Object {
 }
 ```
 
-### Example 17: Multi-Stage Training
+### Example 11: Train Multiple Strategies and Compare
 ```powershell
-# Stage 1: Learn from data (supervised)
+# Train DQN, PPO, and REINFORCE
 python train_from_abm_data.py `
   --results-dir results_20251118_002441 `
-  --strategies dqn `
+  --strategies dqn ppo reinforce `
   --use-winning-only `
-  --epochs 30 `
-  --save-dir models_supervised
+  --epochs 20 `
+  --save-dir models_comparison
 
-# Stage 2: Improve via self-play (reinforcement)
-python trainer.py `
-  --n-matches 5000 `
-  --strategies dqn adaptive `
-  --save-dir models_refined
-  # Load models_supervised/dqn_abm_trained.pt first
-
-# Stage 3: Final polish against diverse opponents
-python trainer.py `
-  --n-matches 3000 `
-  --strategies dqn fullbuy conservative random adaptive momentum `
-  --save-dir models_polished
-```
-
-### Example 18: A/B Testing Different Strategies
-```python
-# compare_strategies.py
-from ml_model import StrategyFactory
-import json
-
-strategies = {
-    'abm_trained': 'models_from_abm/dqn_abm_trained.pt',
-    'selfplay': 'models_selfplay/dqn_final.pt',
-    'baseline': None  # Fresh initialization
+# View training info for each
+Get-ChildItem models_comparison\*.pt | ForEach-Object {
+    Write-Host "`nModel: $($_.Name)"
 }
-
-results = {}
-for name, path in strategies.items():
-    strategy = StrategyFactory.create('dqn')
-    if path:
-        strategy.load(path)
-    
-    # Test on same state
-    test_state = GameState(15000, 7, 7, 3, 3, 1, True, 15, 15, 0, False)
-    action = strategy.select_action(test_state, training=False)
-    
-    results[name] = {
-        'action': float(action),
-        'investment': int(action * test_state.own_funds)
-    }
-
-print(json.dumps(results, indent=2))
 ```
 
-```powershell
-python compare_strategies.py
-```
-
-### Example 19: Data Augmentation
+### Example 12: Data Augmentation
 ```powershell
 # Train on multiple result folders (if you have multiple ABM runs)
 python train_from_abm_data.py `
@@ -417,11 +252,9 @@ python train_from_abm_data.py `
   --strategies dqn `
   --epochs 20 `
   --save-dir models_dataset2
-
-# Combine insights from both
 ```
 
-### Example 20: Production Deployment Checklist
+### Example 13: Production Deployment Checklist
 ```powershell
 # 1. Train production model
 python train_from_abm_data.py `
@@ -432,26 +265,19 @@ python train_from_abm_data.py `
   --batch-size 256 `
   --save-dir production
 
-# 2. Validate performance
-python trainer.py `
-  --n-matches 0 `
-  --eval-matches 2000 `
-  --strategies dqn adaptive `
-  --save-dir production_eval
-
-# 3. Export for Go
+# 2. Export for Go
 python export_models.py `
   --models-dir production `
   --output-dir production_export `
   --strategies dqn
 
-# 4. Test Go integration
-go run your_abm.go --model production_export/dqn_model.json
+# 3. Test in Go ABM
+# (See ABM_INTEGRATION.md for Go code)
 
-# 5. Backup models
+# 4. Backup models
 Copy-Item -Recurse production "production_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 
-# 6. Document version
+# 5. Document version
 @{
     version = "1.0.0"
     trained_date = (Get-Date).ToString()
@@ -468,13 +294,24 @@ Copy-Item -Recurse production "production_backup_$(Get-Date -Format 'yyyyMMdd_HH
 ### Performance Tips
 ```powershell
 # Use batch processing for large datasets
-python train_from_abm_data.py --batch-size 256  # Faster on GPU
+python train_from_abm_data.py --batch-size 256  # Faster if you have GPU
 
 # Limit simulations during development
 python train_from_abm_data.py --n-simulations 100  # Quick iterations
 
 # Use winning-only for cleaner signal
 python train_from_abm_data.py --use-winning-only  # Better convergence
+```
+
+### Analyzing Training Results
+```powershell
+# View training info
+Get-Content models_from_abm/training_info.json | ConvertFrom-Json | Format-List
+
+# Check all model files
+Get-ChildItem models_from_abm/*.pt | ForEach-Object {
+    Write-Host "Model: $($_.Name) - Size: $($_.Length) bytes"
+}
 ```
 
 ### Debugging
@@ -508,12 +345,14 @@ python train_from_abm_data.py --epochs 30 --use-winning-only
 
 ## Next Steps
 
-1. **Start Simple**: Begin with Example 2 (quick prototype)
-2. **Iterate**: Use Example 16 to find best hyperparameters
+1. **Start Simple**: Begin with Example 3 (quick prototype)
+2. **Iterate**: Use Example 10 to find best hyperparameters
 3. **Scale Up**: Move to Example 4 (full training)
-4. **Deploy**: Follow Example 20 (production checklist)
+4. **Deploy**: Follow Example 13 (production checklist)
+5. **Integrate**: See `ABM_INTEGRATION.md` for complete Go integration guide
 
 For more details, see:
-- `RL_README.md` - Comprehensive documentation
+- `ABM_INTEGRATION.md` - Complete guide for using models in Go ABM
+- `RL_README.md` - RL algorithm documentation
 - `QUICKSTART.md` - Quick reference
 - `ml_model.py` - Source code with comments

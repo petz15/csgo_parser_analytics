@@ -48,7 +48,7 @@ class GameState:
     def to_array(self) -> np.ndarray:
         """Convert state to normalized feature vector"""
         return np.array([
-            self.own_funds / 50000.0,  # Normalize to [0, 1]
+            self.own_funds / 999999.0,  # Normalize to [0, 1]
             self.own_score / 16.0,
             self.opponent_score / 16.0,
             self.own_survivors / 5.0,
@@ -701,6 +701,257 @@ class REINFORCEStrategy(BaseStrategy):
 
 
 # ============================================================================
+# Incremental Learning Strategy (SGD-based)
+# ============================================================================
+
+class SGDStrategy(BaseStrategy):
+    """
+    Online learning strategy using Stochastic Gradient Descent
+    Supports incremental updates with partial_fit for continuous improvement
+    """
+    
+    def __init__(self, learning_rate: float = 0.01, name: str = "SGD"):
+        super().__init__(name)
+        self.learning_rate = learning_rate
+        self.state_dim = 11
+        
+        # Use PyTorch for online learning
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        # Simple feedforward network for regression (outputs investment ratio)
+        self.model = nn.Sequential(
+            nn.Linear(self.state_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+            nn.Sigmoid()  # Output in [0, 1]
+        ).to(self.device)
+        
+        self.optimizer = optim.SGD(self.model.parameters(), lr=learning_rate)
+        self.losses = []
+        
+        # Buffer for mini-batch updates
+        self.buffer = []
+        self.batch_size = 32
+    
+    def select_action(self, state: GameState, training: bool = True) -> float:
+        """Select action using current policy"""
+        state_tensor = torch.FloatTensor(state.to_array()).unsqueeze(0).to(self.device)
+        
+        with torch.no_grad():
+            action = self.model(state_tensor).item()
+        
+        # Add exploration noise during training
+        if training:
+            action = np.clip(action + np.random.normal(0, 0.1), 0, 1)
+        
+        return action
+    
+    def update(self, experience: Experience):
+        """Incremental update with experience"""
+        self.buffer.append(experience)
+        
+        # Update when buffer reaches batch size
+        if len(self.buffer) >= self.batch_size:
+            self._train_step()
+            self.buffer = []
+    
+    def _train_step(self):
+        """Train on buffered experiences"""
+        if not self.buffer:
+            return
+        
+        # Prepare batch
+        states = torch.FloatTensor([exp.state.to_array() for exp in self.buffer]).to(self.device)
+        actions = torch.FloatTensor([exp.action for exp in self.buffer]).unsqueeze(1).to(self.device)
+        rewards = torch.FloatTensor([exp.reward for exp in self.buffer]).unsqueeze(1).to(self.device)
+        
+        # Predict actions
+        predicted_actions = self.model(states)
+        
+        # Loss: weighted MSE (reward-weighted behavioral cloning)
+        # Positive rewards -> learn from these actions
+        # Negative rewards -> learn to avoid these actions
+        weights = torch.sigmoid(rewards)  # Convert rewards to weights [0, 1]
+        loss = (weights * (predicted_actions - actions) ** 2).mean()
+        
+        # Update
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+        self.losses.append(loss.item())
+    
+    def save(self, path: str):
+        """Save model"""
+        torch.save({
+            'model': self.model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'match_history': self.match_history,
+            'losses': self.losses,
+            'learning_rate': self.learning_rate,
+        }, path)
+    
+    def load(self, path: str):
+        """Load model"""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        self.match_history = checkpoint['match_history']
+        self.losses = checkpoint['losses']
+        self.learning_rate = checkpoint.get('learning_rate', self.learning_rate)
+
+
+# ============================================================================
+# Tree-Based Strategy (Decision Tree)
+# ============================================================================
+
+class TreeStrategy(BaseStrategy):
+    """
+    Tree-based strategy using Decision Tree or Random Forest
+    Good for interpretability and handling non-linear relationships
+    """
+    
+    def __init__(self, use_forest: bool = True, name: str = None):
+        if name is None:
+            name = "RandomForest" if use_forest else "DecisionTree"
+        super().__init__(name)
+        
+        try:
+            from sklearn.ensemble import RandomForestRegressor
+            from sklearn.tree import DecisionTreeRegressor
+            import joblib
+            self.joblib = joblib
+        except ImportError:
+            raise ImportError("sklearn is required for TreeStrategy. Install with: pip install scikit-learn")
+        
+        self.use_forest = use_forest
+        self.state_dim = 11
+        
+        # Create model
+        if use_forest:
+            from sklearn.ensemble import RandomForestRegressor
+            self.model = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=10,
+                min_samples_split=10,
+                random_state=42,
+                n_jobs=-1
+            )
+        else:
+            from sklearn.tree import DecisionTreeRegressor
+            self.model = DecisionTreeRegressor(
+                max_depth=10,
+                min_samples_split=10,
+                random_state=42
+            )
+        
+        # Buffer for training data
+        self.X_buffer = []
+        self.y_buffer = []
+        self.is_fitted = False
+        # RandomForest is much slower, use larger interval
+        self.retrain_interval = 10000 if use_forest else 1000
+    
+    def select_action(self, state: GameState, training: bool = True) -> float:
+        """Select action using tree model"""
+        state_array = state.to_array().reshape(1, -1)
+        
+        if not self.is_fitted:
+            # Before first training, use conservative strategy
+            return 0.5
+        
+        try:
+            action = self.model.predict(state_array)[0]
+            action = np.clip(action, 0, 1)
+            
+            # Add small exploration noise during training
+            if training:
+                action = np.clip(action + np.random.normal(0, 0.05), 0, 1)
+            
+            return action
+        except:
+            return 0.5
+    
+    def update(self, experience: Experience):
+        """Collect experience and retrain periodically"""
+        # Add to buffer
+        self.X_buffer.append(experience.state.to_array())
+        self.y_buffer.append(experience.action)
+        
+        # Retrain when buffer is large enough
+        if len(self.X_buffer) >= self.retrain_interval:
+            self._retrain()
+    
+    def _retrain(self):
+        """Retrain the tree model with all collected data"""
+        if len(self.X_buffer) < 10:
+            return
+        
+        X = np.array(self.X_buffer)
+        y = np.array(self.y_buffer)
+        
+        # Fit model
+        self.model.fit(X, y)
+        self.is_fitted = True
+        
+        print(f"  [{self.name}] Retrained on {len(X)} samples")
+        
+        # Clear buffers to prevent continuous retraining
+        self.X_buffer = []
+        self.y_buffer = []
+    
+    def finalize_training(self):
+        """Final training with all accumulated data"""
+        print(f"  [{self.name}] Finalizing: X_buffer size = {len(self.X_buffer)}, y_buffer size = {len(self.y_buffer)}")
+        if self.X_buffer:
+            self._retrain()
+        else:
+            print(f"  [{self.name}] WARNING: No data in buffer to train on!")
+    
+    def save(self, path: str):
+        """Save model"""
+        import joblib
+        if self.is_fitted:
+            joblib.dump({
+                'model': self.model,
+                'match_history': self.match_history,
+                'is_fitted': self.is_fitted,
+                'use_forest': self.use_forest,
+            }, path)
+        else:
+            # Save untrained model state (still use joblib for consistency)
+            joblib.dump({
+                'match_history': self.match_history,
+                'is_fitted': False,
+                'use_forest': self.use_forest,
+                'model': None,
+            }, path)
+    
+    def load(self, path: str):
+        """Load model"""
+        import joblib
+        try:
+            data = joblib.load(path)
+            if data.get('model') is not None:
+                self.model = data['model']
+            self.match_history = data.get('match_history', [])
+            self.is_fitted = data.get('is_fitted', False)
+            self.use_forest = data.get('use_forest', self.use_forest)
+        except Exception as e:
+            # Fallback to pickle for legacy files
+            import pickle
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+                if data.get('model') is not None:
+                    self.model = data['model']
+                self.match_history = data.get('match_history', [])
+                self.is_fitted = data.get('is_fitted', False)
+                self.use_forest = data.get('use_forest', self.use_forest)
+
+
+# ============================================================================
 # Strategy Factory and Utilities
 # ============================================================================
 
@@ -719,6 +970,9 @@ class StrategyFactory:
             'dqn': DQNStrategy,
             'ppo': PPOStrategy,
             'reinforce': REINFORCEStrategy,
+            'sgd': SGDStrategy,
+            'tree': lambda: TreeStrategy(use_forest=False),
+            'forest': lambda: TreeStrategy(use_forest=True),
         }
         
         if strategy_type.lower() not in strategies:
@@ -810,6 +1064,9 @@ if __name__ == "__main__":
         'DQN': DQNStrategy(),
         'PPO': PPOStrategy(),
         'REINFORCE': REINFORCEStrategy(),
+        'SGD': SGDStrategy(),
+        'Tree': TreeStrategy(use_forest=False),
+        'Forest': TreeStrategy(use_forest=True),
     }
     
     print(f"\nStrategy Actions for Example State:")

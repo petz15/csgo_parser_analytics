@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from tqdm import tqdm
 from collections import defaultdict
+import torch
 
 from ml_model import (
     GameState, Experience, BaseStrategy, StrategyFactory,
@@ -33,183 +34,169 @@ class ABMDataLoader:
         self._discover_files()
     
     def _discover_files(self):
-        """Find all simulation files"""
+        """Find all simulation CSV files and load summary"""
         if not self.results_folder.exists():
             raise FileNotFoundError(f"Results folder not found: {self.results_folder}")
-        
+
         # Load summary
         summary_path = self.results_folder / 'simulation_summary.json'
         if summary_path.exists():
             with open(summary_path, 'r') as f:
                 self.summary = json.load(f)
             print(f"\n📊 Loaded ABM Summary:")
-            print(f"  Total simulations: {self.summary['total_simulations']}")
-            print(f"  Total rounds: {self.summary['total_rounds']}")
-            print(f"  Team1 win rate: {self.summary['team1_win_rate']:.2f}%")
-            print(f"  Team2 win rate: {self.summary['team2_win_rate']:.2f}%")
-            print(f"  Average rounds per game: {self.summary['average_rounds']:.2f}")
-        
-        # Find all simulation files
-        self.sim_files = sorted(list(self.results_folder.glob('sim_*.json')))
-        print(f"  Found {len(self.sim_files)} simulation files")
+            print(f"  Total simulations: {self.summary.get('total_simulations','?')}")
+            print(f"  Total rounds: {self.summary.get('total_rounds','?')}")
+            print(f"  Team1 win rate: {self.summary.get('team1_win_rate',0):.2f}%")
+            print(f"  Team2 win rate: {self.summary.get('team2_win_rate',0):.2f}%")
+            print(f"  Average rounds per game: {self.summary.get('average_rounds',0):.2f}")
+
+        # Find all simulation CSV files
+        self.sim_files = sorted(list(self.results_folder.glob('*.csv')))
+        print(f"  Found {len(self.sim_files)} simulation CSV files")
     
-    def load_simulation(self, file_path: Path) -> Dict:
-        """Load a single simulation file"""
-        with open(file_path, 'r') as f:
-            return json.load(f)
+    def load_simulation(self, file_path: Path) -> Tuple[list, list]:
+        """Load a single simulation CSV file and return rows and headers"""
+        import csv
+        with open(file_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter=';')
+            rows = list(reader)
+        if not rows:
+            return [], []
+        headers = rows[0]
+        data_rows = rows[1:]
+        return data_rows, headers
     
-    def extract_trajectories(self, simulation: Dict) -> Tuple[List[Experience], List[Experience]]:
+    def extract_trajectories(self, data_rows, headers) -> Tuple[List[Experience], List[Experience]]:
         """
-        Extract experience trajectories for both teams from a simulation
+        Extract experience trajectories for both teams from CSV rows and headers
         Returns: (team1_experiences, team2_experiences)
         """
+        # Get half length and OT info from summary
+        half_length = 15
+        ot_half_length = 3
+        if self.summary:
+            half_length = self.summary.get('GameRules', {}).get('halfLength', 15)
+            ot_half_length = self.summary.get('GameRules', {}).get('otHalfLength', 3)
+
+        # Map headers to indices
+        header_idx = {h: i for i, h in enumerate(headers)}
+
+        # Typical column names (customize if needed)
+        t1_prefix = 't1_'
+        t2_prefix = 't2_'
+
+        # Required columns
+        def col(name, team):
+            prefix = t1_prefix if team == 1 else t2_prefix
+            return header_idx.get(prefix + name)
+
+        # Experience lists
         team1_experiences = []
         team2_experiences = []
-        
-        rounds = simulation.get('Rounds', [])
-        final_score = simulation.get('Score', [0, 0])
-        team1_won = final_score[0] > final_score[1]
-        
-        # Track economic state (simplified - would need full economy simulation)
-        team1_funds = 4000
-        team2_funds = 4000
-        team1_consec_losses = 0
-        team2_consec_losses = 0
-        
-        for i, round_data in enumerate(rounds):
-            round_num = round_data.get('RoundNumber', i + 1)
-            team1_is_ct = round_data.get('is_t1_ct', True)
-            
-            # Calculate current scores
-            team1_score = sum(1 for r in rounds[:i] if r.get('is_t1_winner_team', False))
-            team2_score = sum(1 for r in rounds[:i] if not r.get('is_t1_winner_team', True))
-            
-            # Get previous round info
-            if i > 0:
-                prev_round = rounds[i - 1]
-                prev_outcome = prev_round.get('Calc_Outcome', {})
-                
-                if prev_round.get('is_t1_winner_team', False):
-                    team1_prev_survs = prev_outcome.get('CTSurvivors' if prev_round.get('is_t1_ct') else 'TSurvivors', 3)
-                    team2_prev_survs = prev_outcome.get('TSurvivors' if prev_round.get('is_t1_ct') else 'CTSurvivors', 1)
-                else:
-                    team1_prev_survs = prev_outcome.get('TSurvivors' if prev_round.get('is_t1_ct') else 'CTSurvivors', 1)
-                    team2_prev_survs = prev_outcome.get('CTSurvivors' if prev_round.get('is_t1_ct') else 'TSurvivors', 3)
-                
-                last_reason = prev_outcome.get('ReasonCode', 0)
-                last_bomb = prev_outcome.get('BombPlanted', False)
+
+        prev_row = None
+        for i, row in enumerate(data_rows):
+            # Parse round number
+            round_num = int(row[header_idx.get('round_number', 0)])
+
+            # Team sides (CT/T)
+            team1_is_ct = row[header_idx.get('is_t1_ct', -1)] == 'true' if header_idx.get('is_t1_ct', -1) != -1 else True
+            team2_is_ct = not team1_is_ct  # T2 is opposite of T1
+
+            # Scores
+            team1_score = int(row[col('score_end', 1)]) if col('score_end', 1) is not None else 0
+            team2_score = int(row[col('score_end', 2)]) if col('score_end', 2) is not None else 0
+
+            # Survivors
+            team1_survivors = int(row[col('survivors', 1)]) if col('survivors', 1) is not None else 5
+            team2_survivors = int(row[col('survivors', 2)]) if col('survivors', 2) is not None else 5
+
+            # Consecutive losses
+            team1_consec_losses = int(row[col('consecutive_losses', 1)]) if col('consecutive_losses', 1) is not None else 0
+            team2_consec_losses = int(row[col('consecutive_losses', 2)]) if col('consecutive_losses', 2) is not None else 0
+
+            # Funds
+            team1_funds = float(row[col('funds_start', 1)]) if col('funds_start', 1) is not None else 4000
+            team2_funds = float(row[col('funds_start', 2)]) if col('funds_start', 2) is not None else 4000
+
+            # Equipment value
+            team1_equip = float(row[col('fte_eq', 1)]) if col('fte_eq', 1) is not None else 0
+            team2_equip = float(row[col('fte_eq', 2)]) if col('fte_eq', 2) is not None else 0
+
+            # Earned (reward)
+            team1_earned = float(row[col('earned', 1)]) if col('earned', 1) is not None else 0
+            team2_earned = float(row[col('earned', 2)]) if col('earned', 2) is not None else 0
+
+            # Compute investment ratio
+            action1 = min(1.0, team1_equip / max(team1_funds, 1))
+            action2 = min(1.0, team2_equip / max(team2_funds, 1))
+
+            # Calculate last_round_reason and last_bomb_planted
+            if prev_row is not None:
+                last_reason = int(prev_row[header_idx.get('outcome_reason_code', -1)]) if header_idx.get('outcome_reason_code', -1) != -1 else 0
+                last_bomb = prev_row[header_idx.get('outcome_bomb_planted', -1)] == 'true' if header_idx.get('outcome_bomb_planted', -1) != -1 else False
+                team1_prev_survivors = int(prev_row[col('survivors', 1)]) if col('survivors', 1) is not None else 5
+                team2_prev_survivors = int(prev_row[col('survivors', 2)]) if col('survivors', 2) is not None else 5
             else:
-                team1_prev_survs = 5
-                team2_prev_survs = 5
                 last_reason = 0
                 last_bomb = False
-            
-            # Create states
+                team1_prev_survivors = 5
+                team2_prev_survivors = 5
+
+            # GameState for each team
             state1 = GameState(
                 own_funds=team1_funds,
                 own_score=team1_score,
                 opponent_score=team2_score,
-                own_survivors=team1_prev_survs,
-                opponent_survivors=team2_prev_survs,
+                own_survivors=team1_prev_survivors,
+                opponent_survivors=team2_prev_survivors,
                 consecutive_losses=team1_consec_losses,
                 is_ct_side=team1_is_ct,
                 round_number=round_num,
-                half_length=15,
+                half_length=half_length,
                 last_round_reason=last_reason,
                 last_bomb_planted=last_bomb
             )
-            
             state2 = GameState(
                 own_funds=team2_funds,
                 own_score=team2_score,
                 opponent_score=team1_score,
-                own_survivors=team2_prev_survs,
-                opponent_survivors=team1_prev_survs,
+                own_survivors=team2_prev_survivors,
+                opponent_survivors=team1_prev_survivors,
                 consecutive_losses=team2_consec_losses,
-                is_ct_side=not team1_is_ct,
+                is_ct_side=team2_is_ct,
                 round_number=round_num,
-                half_length=15,
+                half_length=half_length,
                 last_round_reason=last_reason,
                 last_bomb_planted=last_bomb
             )
-            
-            # Extract actual investments from simulation
-            outcome = round_data.get('Calc_Outcome', {})
-            
-            # Calculate equipment investment ratios (approximate from simulation data)
-            ct_equip_total = sum(outcome.get('CTEquipmentPerPlayer', [0]))
-            t_equip_total = sum(outcome.get('TEquipmentPerPlayer', [0]))
-            
-            # Approximate investment ratio (assuming they had some funds)
-            # In reality, we'd need to track the exact economy
-            if team1_is_ct:
-                team1_equip = ct_equip_total
-                team2_equip = t_equip_total
-            else:
-                team1_equip = t_equip_total
-                team2_equip = ct_equip_total
-            
-            # Estimate action as ratio (capped at 1.0)
-            action1 = min(1.0, team1_equip / max(team1_funds, 1))
-            action2 = min(1.0, team2_equip / max(team2_funds, 1))
-            
-            # Round outcome
-            team1_won_round = round_data.get('is_t1_winner_team', False)
-            
-            # Calculate round reward
-            round_reward1 = 1.0 if team1_won_round else -1.0
-            round_reward2 = -round_reward1
-            
-            # Create next states (will be filled in next iteration)
+
+            # Reward for each team
+            round_reward1 = team1_earned
+            round_reward2 = team2_earned
+
+            # Next state (filled in next iteration)
             next_state1 = None
             next_state2 = None
-            
-            if i < len(rounds) - 1:
-                # Not the last round, next state will be created in next iteration
-                team1_experiences.append((state1, action1, round_reward1))
-                team2_experiences.append((state2, action2, round_reward2))
-            else:
-                # Last round, add match outcome reward
-                match_reward1 = 10.0 if team1_won else -10.0
-                match_reward2 = -match_reward1
-                team1_experiences.append((state1, action1, round_reward1 + match_reward1))
-                team2_experiences.append((state2, action2, round_reward2 + match_reward2))
-            
-            # Update economy (simplified CS:GO economy rules)
-            loss_bonus = [1400, 1900, 2400, 2900, 3400]
-            
-            if team1_won_round:
-                team1_funds += 3250  # Win reward
-                team1_funds -= team1_equip
-                team1_consec_losses = 0
-                team2_consec_losses = min(4, team2_consec_losses + 1)
-                team2_funds += loss_bonus[team2_consec_losses]
-                team2_funds -= team2_equip
-            else:
-                team2_funds += 3250
-                team2_funds -= team2_equip
-                team2_consec_losses = 0
-                team1_consec_losses = min(4, team1_consec_losses + 1)
-                team1_funds += loss_bonus[team1_consec_losses]
-                team1_funds -= team1_equip
-            
-            # Add passive income and cap
-            team1_funds = max(0, min(50000, team1_funds + 1400))
-            team2_funds = max(0, min(50000, team2_funds + 1400))
-        
+
+            team1_experiences.append((state1, action1, round_reward1))
+            team2_experiences.append((state2, action2, round_reward2))
+
+            prev_row = row
+
         # Convert to Experience objects
         team1_exp_list = []
         for i, (state, action, reward) in enumerate(team1_experiences):
             next_state = team1_experiences[i + 1][0] if i < len(team1_experiences) - 1 else None
             done = (i == len(team1_experiences) - 1)
             team1_exp_list.append(Experience(state, action, reward, next_state, done))
-        
+
         team2_exp_list = []
         for i, (state, action, reward) in enumerate(team2_experiences):
             next_state = team2_experiences[i + 1][0] if i < len(team2_experiences) - 1 else None
             done = (i == len(team2_experiences) - 1)
             team2_exp_list.append(Experience(state, action, reward, next_state, done))
-        
+
         return team1_exp_list, team2_exp_list
 
 
@@ -224,43 +211,34 @@ class ImitationTrainer:
     
     def collect_experiences(self, n_simulations: int = None):
         """
-        Collect experiences from simulation files
+        Collect experiences from simulation CSV files
         """
         sim_files = self.data_loader.sim_files
         if n_simulations:
             sim_files = sim_files[:n_simulations]
-        
+
         print(f"\n📥 Collecting experiences from {len(sim_files)} simulations...")
-        
+
         total_rounds = 0
-        winning_experiences = []
-        losing_experiences = []
-        
+        team1_experiences = []
+        team2_experiences = []
+
         for sim_file in tqdm(sim_files, desc="Loading simulations"):
             try:
-                sim_data = self.data_loader.load_simulation(sim_file)
-                team1_exp, team2_exp = self.data_loader.extract_trajectories(sim_data)
-                
-                # Separate winning and losing team experiences
-                final_score = sim_data.get('Score', [0, 0])
-                if final_score[0] > final_score[1]:
-                    winning_experiences.extend(team1_exp)
-                    losing_experiences.extend(team2_exp)
-                else:
-                    winning_experiences.extend(team2_exp)
-                    losing_experiences.extend(team1_exp)
-                
-                total_rounds += len(team1_exp)
-                
+                data_rows, headers = self.data_loader.load_simulation(sim_file)
+                t1_exp, t2_exp = self.data_loader.extract_trajectories(data_rows, headers)
+                team1_experiences.extend(t1_exp)
+                team2_experiences.extend(t2_exp)
+                total_rounds += len(t1_exp)
             except Exception as e:
                 print(f"Error processing {sim_file.name}: {e}")
                 continue
-        
+
         print(f"\n✓ Collected {total_rounds} rounds of experience")
-        print(f"  Winning team experiences: {len(winning_experiences)}")
-        print(f"  Losing team experiences: {len(losing_experiences)}")
-        
-        return winning_experiences, losing_experiences
+        print(f"  Team1 experiences: {len(team1_experiences)}")
+        print(f"  Team2 experiences: {len(team2_experiences)}")
+
+        return team1_experiences, team2_experiences
     
     def train_strategy(self, strategy: BaseStrategy, experiences: List[Experience],
                       n_epochs: int = 10, batch_size: int = 64):
@@ -276,9 +254,40 @@ class ImitationTrainer:
             print(f"Strategy {strategy.name} cannot be trained (no update method)")
             return
         
+        # Import for type checking
+        from ml_model import DQNStrategy, PPOStrategy, REINFORCEStrategy, SGDStrategy, TreeStrategy
+        
         print(f"\n🎯 Training {strategy.name}...")
         print(f"  Total experiences: {len(experiences)}")
         print(f"  Epochs: {n_epochs}")
+        
+        # For Tree-based strategies, train directly on all data
+        if isinstance(strategy, TreeStrategy):
+            print("  Tree-based learning: feeding all experiences...")
+            for exp in tqdm(experiences, desc="Adding experiences"):
+                strategy.update(exp)
+            
+            # Final training
+            print("  Finalizing tree training...")
+            strategy.finalize_training()
+            print(f"  Tree model trained on {len(experiences)} experiences")
+            return
+        
+        # For SGD strategy, incremental learning
+        if isinstance(strategy, SGDStrategy):
+            print("  Incremental learning with SGD...")
+            for epoch in range(n_epochs):
+                np.random.shuffle(experiences)
+                losses = []
+                
+                for exp in tqdm(experiences, desc=f"Epoch {epoch+1}/{n_epochs}"):
+                    strategy.update(exp)
+                    if strategy.losses:
+                        losses.append(strategy.losses[-1])
+                
+                if losses:
+                    print(f"  Epoch {epoch+1} avg loss: {np.mean(losses[-100:]):.4f}")
+            return
         
         # For DQN, add experiences to replay buffer
         if isinstance(strategy, DQNStrategy):
@@ -347,6 +356,10 @@ def main():
                        help='Directory to save trained models')
     parser.add_argument('--use-winning-only', action='store_true',
                        help='Train only on winning team behaviors')
+    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'cpu'],
+                       help='Computation device: auto (default), cuda, or cpu')
+    parser.add_argument('--export-go-dir', type=str, default=None,
+                       help='If provided, export trained models to Go JSON in this directory after training')
     
     args = parser.parse_args()
     
@@ -370,7 +383,16 @@ def main():
         training_experiences = winning_exp + losing_exp
     
     # Create strategies
+    # Resolve device
+    if args.device == 'auto':
+        resolved_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    else:
+        if args.device == 'cuda' and not torch.cuda.is_available():
+            raise RuntimeError('CUDA requested but not available. Install CUDA-capable PyTorch or select cpu.')
+        resolved_device = args.device
+
     print(f"\n🤖 Initializing strategies: {', '.join(args.strategies)}")
+    print(f"  Using device: {resolved_device}")
     strategies = {}
     for strategy_type in args.strategies:
         try:
@@ -383,6 +405,30 @@ def main():
         print("No valid strategies to train!")
         return
     
+    # Helper to move strategy modules to target device (for explicit override)
+    def move_strategy_to_device(strategy, device_str: str):
+        if not hasattr(strategy, 'device'):
+            return
+        device = torch.device(device_str)
+        strategy.device = device
+        # DQN
+        from ml_model import DQNStrategy, PPOStrategy, REINFORCEStrategy, SGDStrategy
+        if isinstance(strategy, DQNStrategy):
+            strategy.q_network.to(device)
+            strategy.target_network.to(device)
+        elif isinstance(strategy, PPOStrategy):
+            strategy.policy.to(device)
+            strategy.value.to(device)
+        elif isinstance(strategy, REINFORCEStrategy):
+            strategy.policy.to(device)
+        elif isinstance(strategy, SGDStrategy):
+            strategy.model.to(device)
+
+    # Explicitly move strategies if user forced device (when auto we rely on internal init)
+    if args.device != 'auto':
+        for s in strategies.values():
+            move_strategy_to_device(s, resolved_device)
+
     # Train each strategy
     for name, strategy in strategies.items():
         try:
@@ -407,6 +453,16 @@ def main():
     print("\n" + "=" * 70)
     print("Training complete!")
     print(f"Models saved to: {args.save_dir}")
+
+    # Optional Go export
+    if args.export_go_dir:
+        try:
+            from export_models import export_all_models
+            go_export_dir = args.export_go_dir
+            print(f"\n🚀 Exporting models to Go format in: {go_export_dir}")
+            export_all_models(args.save_dir, go_export_dir)
+        except Exception as e:
+            print(f"✗ Go export failed: {e}")
     print("=" * 70)
     
     # Save training info
